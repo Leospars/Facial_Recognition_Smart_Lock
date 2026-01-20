@@ -56,6 +56,7 @@ Dependencies (PlatformIO)
 **Behavior Notes**
 - K230D wake: PIR or remote commands call `wakeK230D()` which toggles the K230D power pin and logs activity. K230D is auto-powered down after ~3s of no face detection (configurable in code).
 - Auth lockout: 3 failed auth attempts set an authorization timeout (`AUTH_DISABLE_TIME`) — after that period authFail resets.
+- Intruder handling: repeated unknown-face detections increment an `intruder` counter and can cause a longer timeout.
 - Battery monitoring: periodic ADC reads map to battery percentages and trigger FCM notifications for low battery states.
 
 **Power Saving**
@@ -81,4 +82,3 @@ Dependencies (PlatformIO)
 - Update schematics and pin declarations to use ESP32 S3 instead of the ESP32 C5 which I was going to use at first but will change due to board unavailability and unsuccessful compilation in Arduino IDE 2, ESP32C5 is currently very new.
 - Write code for BLE server
 - Configure and test FCM and remote MQTT commands
-- Intruder handling condition for repeated
