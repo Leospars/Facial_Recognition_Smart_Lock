@@ -33,10 +33,10 @@ const char *fcm_server = "fcm.googleapis.com";
 const char *fcm_key = "YOUR_FCM_SERVER_KEY";  // Legacy Key or OAuth2 Relay
 const char *mqtt_server = "broker.hivemq.com";
 
-#define AUTH_DISABLE_TIME 30 * 60000UL  // 30 minutes
-#define COMMISSION_TIME 5 * 60000UL    // 5 minutes
-#define MQTT_ACTIVE_TIMEOUT 2 * 60000UL    // 2 minutes
-#define K230D_MAX_UPTIME 3000UL        // 3 seconds
+#define AUTH_DISABLE_TIME 30 * 60000UL   // 30 minutes
+#define COMMISSION_TIME 5 * 60000UL      // 5 minutes
+#define MQTT_ACTIVE_TIMEOUT 2 * 60000UL  // 2 minutes
+#define K230D_MAX_UPTIME 3000UL          // 3 seconds
 
 // --- Instances ---
 TFT_eSPI tft = TFT_eSPI();
@@ -57,12 +57,17 @@ bool mqttActive = false;
 unsigned long authTimeout = 0;
 unsigned long bootTime = 0;
 unsigned long commissionTimeout = 0;
+unsigned long faceUnlockTimeout = 0;
 unsigned long lastActivity = 0;
 unsigned long k230StartTime = 0;
+unsigned long k230UpTime = 0;
+
 bool k230IsRunning = false;
+bool pinManuallyEntered = false;
 bool share_analytics = false;
 bool notify_motion = false;
 
+uint8_t intruder = 0;
 uint8_t authFail = 0;
 String passcodeBuffer = "";
 
@@ -146,6 +151,11 @@ void handlePIR() {
 
 void wakeK230D(String command) {
   digitalWrite(K230D_PWR_PIN, HIGH);
+  if (faceUnlockTimeout) {
+    command.replace("}", ", \"face-timeout\": true }");
+    //Disable camera on start up and skip face recog code,
+    // but if doorbell request then enable camera on K230D side
+  }
   Serial.println(command);
   k230StartTime = millis();
   k230IsRunning = true;
@@ -154,7 +164,8 @@ void wakeK230D(String command) {
 void K230DPowerOff() {
   digitalWrite(K230D_PWR_PIN, LOW);
   k230IsRunning = false;
-  serverLog("{\"event\": \"power_off\", \"uptime\": \"" + String((millis() - k230StartTime) / 1000) + "\"}");
+  serverLog("{\"event\": \"power_off\", \"uptime\": \"" + String(k230UpTime / 1000) + "\"}");
+  k230UpTime = 0;
   Serial.println("K230D Powered Off.");
 }
 
@@ -185,14 +196,21 @@ void handleTimeouts() {
     Serial.println("K230D Timeout: No face detected. Powering down.");
     K230DPowerOff();
   }
+
+  // Timeout after failure extension until pin is manually entered
+  if (faceUnlockTimeout && pinManuallyEntered) {
+    faceUnlockTimeout = 0;
+    intruder = 0;
+    pinManuallyEntered = false;
+  }
 }
 
 void unlockDoor(String source) {
   FCM_Notification("Lock Status", "Unlocked by " + source);
   // Fail-secure lock logic, Adjust logic for your lock type
-  digitalWrite(LOCK_PIN, HIGH);   // Activate Solenoid (Open Lock)
+  digitalWrite(LOCK_PIN, HIGH);  // Activate Solenoid (Open Lock)
   delay(3000);                   // Pulse duration
-  digitalWrite(LOCK_PIN, LOW);  // Deactivate
+  digitalWrite(LOCK_PIN, LOW);   // Deactivate
 }
 
 bool checkPin(const char *passCode) {
@@ -221,8 +239,16 @@ void handleUART() {
         K230DPowerOff();
       } else if (status == "intruder") {
         FCM_Notification("Intruder Alert!", "Unknown face detected at door.");
-        // Stay on for another interval (reset timer) to capture more frames/upload
-        k230StartTime = millis();
+        intruder += 1;
+        if (intruder <= 3) {
+          // Stay on for another 3s (reset timer) to capture more frames/upload
+          k230UpTime += millis() - k230StartTime;
+          k230StartTime = millis();
+        } else {
+          faceUnlockTimeout = millis();
+          K230DPowerOff();
+        }
+        serverLog("{\"event\": \"unlock\", \"method\": \"face\", \"success\": \"false\"}");
       } else if (status == "awake") {
         bootTime = (millis() - k230StartTime);
         serverLog("{\"event\": \"boot\", \"bootTime\": \"" + String(float(bootTime) / 1000.0, 4) + "\"}");
@@ -331,16 +357,16 @@ void initialCommisioning() {
       LOCK_NAME = bleData["lock-name"].as<String>();
       OWNER_NAME = bleData["owner-name"].as<String>();
       String PIN = bleData["pin"].as<String>();
-    
+
       prefs.putString("wifi-ssid", WIFI_SSID);
       prefs.putString("wifi-pwd", WIFI_PWD);
       prefs.putString("user-id", USER_ID);
-    prefs.putString("lock-name", LOCK_NAME);
+      prefs.putString("lock-name", LOCK_NAME);
       prefs.putString("owner-name", OWNER_NAME);
-    prefs.putString("pin", PIN);
+      prefs.putString("pin", PIN);
     }
   }
-  
+
   // Matter.begin(); // Provisioning starts here
   // After Wi-Fi credentials are received via Matter BLE:
   WiFi.begin(WIFI_SSID, WIFI_PWD);
@@ -434,12 +460,12 @@ HTTPResponse updateSettings(String body) {
   long time = data["time"];  // 1351824120
 
   JsonObject settings = data["settings"];
-  int motion_sensitivity = settings["motion-sensitivity"];   // 80
-  int vid_quality = settings["vid-quality"];                 // 1024
-  int call_timeout = settings["call-timeout"];               // 40
-  int snippet_time = settings["snippet-time"];               // 15
-  notify_motion = settings["notify-motion"];                 // true
-  share_analytics = settings["share-analytics"];             // true
+  int motion_sensitivity = settings["motion-sensitivity"];  // 80
+  int vid_quality = settings["vid-quality"];                // 1024
+  int call_timeout = settings["call-timeout"];              // 40
+  int snippet_time = settings["snippet-time"];              // 15
+  notify_motion = settings["notify-motion"];                // true
+  share_analytics = settings["share-analytics"];            // true
 
   if (!checkPin(data["pin"].as<const char *>()) || !name.equals(OWNER_NAME)) {
     authFail += 1;
@@ -457,13 +483,13 @@ HTTPResponse updateSettings(String body) {
         return HTTPResponse{ 400, "application/json", "{\"status\":\"fail\", \"error\":\"Unknown settings. May need firmware update\"}" };
       }
 
-      uint value = (uint) kvp.value() | prefs.getUInt(option.c_str());
-      prefs.putUInt(option.c_str(), value); // Write settings to non-volatile storage
+      uint value = (uint)kvp.value() | prefs.getUInt(option.c_str());
+      prefs.putUInt(option.c_str(), value);  // Write settings to non-volatile storage
       if (option.equals("lock-name")) {
         FCM_Notification("Change Lock Name", name + " changed " + OWNER_NAME + "'s " + LOCK_NAME + " to " + value + ".");
-      } else if(option.equals("call-timeout")) {
+      } else if (option.equals("call-timeout")) {
         wakeK230D("{\"cmd\":\"set_call_timeout\", \"call-timeout\": " + String(value) + "}");
-      } else if(option.equals("snippet-time")) {
+      } else if (option.equals("snippet-time")) {
         wakeK230D("{\"cmd\":\"set_snippet_time\", \"snippet-time\": " + String(value) + "}");
       } else if (option.equals("vid-quality")) {
         wakeK230D("{\"cmd\":\"set_vid_quality\", \"vid-quality\": " + String(value) + "}");
@@ -545,8 +571,11 @@ void handleTouch() {
         FCM_Notification("Doorbell", "Someone is at " + OWNER_NAME + "'s " + LOCK_NAME + "!");
         mqttActive = true;  // Enable MQTT to listen for the call initiation
       } else {
-        if (checkPin(passcodeBuffer.c_str()))
+        if (checkPin(passcodeBuffer.c_str())) {
           unlockDoor("Passcode");
+          if (faceUnlockTimeout)
+            pinManuallyEntered = true;
+        }
         passcodeBuffer = "";
       }
     }
