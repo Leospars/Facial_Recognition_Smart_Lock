@@ -51,9 +51,11 @@ Dependencies (PlatformIO)
 
 **Local REST API (HTTP on ESP32)**
 - `POST /unlock` — Body: JSON { "pin": "1234", "name": "Caller" }. Verifies stored PIN and pulses the lock.
+- `PATCH /update-settings` — Body: JSON with `name`, `pin`, and `settings` object. Requires auth with correct owner name + PIN. Settings include: `vid-quality`,  `call-timeout`, `snippet-time`, `share-analytics`.
 
 **Behavior Notes**
-- K230D wake: PIR or remote commands call `wakeK230D()` which toggles the K230D power pin and logs activity. K230D is auto-powered down after ~5s of no face detection (configurable in code).
+- K230D wake: PIR or remote commands call `wakeK230D()` which toggles the K230D power pin and logs activity. K230D is auto-powered down after ~3s of no face detection (configurable in code).
+- Auth lockout: 3 failed auth attempts set an authorization timeout (`AUTH_DISABLE_TIME`) — after that period authFail resets.
 - Battery monitoring: periodic ADC reads map to battery percentages and trigger FCM notifications for low battery states.
 
 **Power Saving**
@@ -80,4 +82,3 @@ Dependencies (PlatformIO)
 - Write code for BLE server
 - Configure and test FCM and remote MQTT commands
 - Intruder handling condition for repeated
-

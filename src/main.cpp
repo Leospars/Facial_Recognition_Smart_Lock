@@ -34,6 +34,9 @@ const char *fcm_key = "YOUR_FCM_SERVER_KEY";  // Legacy Key or OAuth2 Relay
 const char *mqtt_server = "broker.hivemq.com";
 
 #define AUTH_DISABLE_TIME 30 * 60000UL  // 30 minutes
+#define COMMISSION_TIME 5 * 60000UL    // 5 minutes
+#define MQTT_ACTIVE_TIMEOUT 2 * 60000UL    // 2 minutes
+#define K230D_MAX_UPTIME 3000UL        // 3 seconds
 
 // --- Instances ---
 TFT_eSPI tft = TFT_eSPI();
@@ -47,11 +50,13 @@ Preferences prefs;
 // --- Stored Variables ---
 String LOCK_NAME = "";
 String OWNER_NAME = "";
+String USER_ID = "";
 
 // --- State Management ---
 bool mqttActive = false;
 unsigned long authTimeout = 0;
 unsigned long bootTime = 0;
+unsigned long commissionTimeout = 0;
 unsigned long lastActivity = 0;
 unsigned long k230StartTime = 0;
 bool k230IsRunning = false;
@@ -65,6 +70,7 @@ String passcodeBuffer = "";
 void handlePIR();
 void handleUART();
 void handleTouch();
+void handleTimeouts();
 void monitorBattery();
 void initialCommisioning();
 void wakeK230D(String command = "{\"cmd\":\"On\"}");
@@ -122,26 +128,9 @@ void loop() {
   if (mqttActive) {
     if (!mqttClient.connected()) reconnectMQTT();
     mqttClient.loop();
-
-    // Auto-disable MQTT after 2 minutes of no remote commands to save battery
-    if (millis() - lastActivity > 120000) {
-      endMQTTSession();
-    }
   }
 
-  if (authTimeout) {
-    if (millis() >= authTimeout + AUTH_DISABLE_TIME) {
-      authTimeout = 0;
-      authFail = 0;
-    }
-  }
-
-  // K230D Power Management (5s timeout logic)
-  if (k230IsRunning && (millis() - k230StartTime > 5000)) {
-    Serial.println("K230D Timeout: No face detected. Powering down.");
-    digitalWrite(K230D_PWR_PIN, LOW);
-    k230IsRunning = false;
-  }
+  handleTimeouts();
 }
 
 // --- CORE LOGIC FUNCTIONS ---
@@ -169,10 +158,39 @@ void K230DPowerOff() {
   Serial.println("K230D Powered Off.");
 }
 
+void handleTimeouts() {
+  if (commissionTimeout) {
+    if (millis() >= commissionTimeout + COMMISSION_TIME) {  // 5 minutes
+      commissionTimeout = 0;
+      ESP.deepSleep(0);  // Restart to re-initiate provisioning
+    }
+  }
+
+  if (authTimeout) {
+    if (millis() >= authTimeout + AUTH_DISABLE_TIME) {
+      authTimeout = 0;
+      authFail = 0;
+    }
+  }
+
+  if (mqttActive) {
+    // Auto-disable MQTT after 2 minutes of no remote commands to save battery
+    if (millis() - lastActivity > MQTT_ACTIVE_TIMEOUT) {
+      endMQTTSession();
+    }
+  }
+
+  // K230D Power Management (3s x 3 = 9s timeout logic)
+  if (k230IsRunning && (millis() - k230StartTime > K230D_MAX_UPTIME)) {
+    Serial.println("K230D Timeout: No face detected. Powering down.");
+    K230DPowerOff();
+  }
+}
+
 void unlockDoor(String source) {
   FCM_Notification("Lock Status", "Unlocked by " + source);
   // Fail-secure lock logic, Adjust logic for your lock type
-  digitalWrite(LOCK_PIN, HIGH);   // Activate Solenoid
+  digitalWrite(LOCK_PIN, HIGH);   // Activate Solenoid (Open Lock)
   delay(3000);                   // Pulse duration
   digitalWrite(LOCK_PIN, LOW);  // Deactivate
 }
@@ -272,7 +290,7 @@ void FCM_Notification(String title, String body) {
   WiFiClientSecure client;
   client.setInsecure();
   if (client.connect(fcm_server, 443)) {
-    String payload = "{\"to\":\"/topics/all\", \"priority\":\"high\", \"notification\":{\"title\":\"" + title + "\", \"body\":\"" + body + "\"}}";
+    String payload = "{\"to\":\"/topics/" + USER_ID + "/all\", \"priority\":\"high\", \"notification\":{\"title\":\"" + title + "\", \"body\":\"" + body + "\"}}";
     client.println("POST /fcm/send HTTP/1.1");
     client.println("Authorization: key=" + String(fcm_key));
     client.println("Content-Type: application/json");
@@ -287,18 +305,40 @@ void FCM_Notification(String title, String body) {
 void initialCommisioning() {
   String WIFI_SSID = prefs.getString("wifi-ssid");
   String WIFI_PWD = prefs.getString("wifi-pwd");
+  USER_ID = prefs.getString("user-id");
+  LOCK_NAME = prefs.getString("lock-name");
+  OWNER_NAME = prefs.getString("owner-name");
 
-  if (WIFI_SSID == "") {
-    // Start Matter or BLE provisioning to get Wi-Fi, lock and user credentials
+  if (WIFI_SSID.isEmpty()) {
+    // Start 5 minutes timeout in pairing mode
+    commissionTimeout = true;
 
-    LOCK_NAME = "lock";
-    OWNER_NAME = "owner";
-    String PIN = "1234";
+    // Await BLE message
+    String payload = "{ \
+      \"user-id\":\"user123\", \
+      \"wifi-ssid\":\"MyWiFiSSID\", \
+      \"wifi-pwd\":\"MyWiFiPassword\", \
+      \"lock-name\":\"Front Door Lock\", \
+      \"owner-name\":\"John Doe\" \
+    }";  // Placeholder for received BLE payload
+
+    JsonDocument bleData;
+    DeserializationError error = deserializeJson(bleData, payload);
+    if (!error) {
+      USER_ID = bleData["user-id"].as<String>();
+      WIFI_SSID = bleData["wifi-ssid"].as<String>();
+      WIFI_PWD = bleData["wifi-pwd"].as<String>();
+      LOCK_NAME = bleData["lock-name"].as<String>();
+      OWNER_NAME = bleData["owner-name"].as<String>();
+      String PIN = bleData["pin"].as<String>();
     
-    prefs.putString("wifi-ssid", "Your_SSID");
-    prefs.putString("wifi-pwd", "Your_PASSWORD");
+      prefs.putString("wifi-ssid", WIFI_SSID);
+      prefs.putString("wifi-pwd", WIFI_PWD);
+      prefs.putString("user-id", USER_ID);
     prefs.putString("lock-name", LOCK_NAME);
+      prefs.putString("owner-name", OWNER_NAME);
     prefs.putString("pin", PIN);
+    }
   }
   
   // Matter.begin(); // Provisioning starts here
@@ -332,8 +372,8 @@ void endMQTTSession() {
 }
 
 void reconnectMQTT() {
-  if (mqttClient.connect("SmartLock_ESP32")) {
-    mqttClient.subscribe("lock/commands");
+  if (mqttClient.connect("JUPY_SmartLock")) {
+    mqttClient.subscribe(("lock/commands/" + USER_ID).c_str(), 0);
   }
 }
 
@@ -350,7 +390,7 @@ void mqttCallback(char *topic, byte *payload, unsigned int length) {
 void serverLog(String log) {
   //TODO: User database logging instead via post request instead of MQTT
   if (mqttActive) {
-    mqttClient.publish("lock/logs/", log.c_str());
+    mqttClient.publish(("lock/logs/" + USER_ID).c_str(), log.c_str());
   }
 }
 
@@ -502,7 +542,7 @@ void handleTouch() {
       passcodeBuffer = "";
     } else if (row == 3 && col == 2) {  // B - Bell
       if (passcodeBuffer.length() == 0) {
-        FCM_Notification("Doorbell", "Someone is at " + LOCK_NAME + "!");
+        FCM_Notification("Doorbell", "Someone is at " + OWNER_NAME + "'s " + LOCK_NAME + "!");
         mqttActive = true;  // Enable MQTT to listen for the call initiation
       } else {
         if (checkPin(passcodeBuffer.c_str()))
