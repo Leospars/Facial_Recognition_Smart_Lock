@@ -33,6 +33,8 @@ const char *fcm_server = "fcm.googleapis.com";
 const char *fcm_key = "YOUR_FCM_SERVER_KEY";  // Legacy Key or OAuth2 Relay
 const char *mqtt_server = "broker.hivemq.com";
 
+#define AUTH_DISABLE_TIME 30 * 60000UL  // 30 minutes
+
 // --- Instances ---
 TFT_eSPI tft = TFT_eSPI();
 // XPT2046_Touchscreen ts(TOUCH_CS);
@@ -44,13 +46,19 @@ Preferences prefs;
 
 // --- Stored Variables ---
 String LOCK_NAME = "";
+String OWNER_NAME = "";
 
 // --- State Management ---
 bool mqttActive = false;
+unsigned long authTimeout = 0;
 unsigned long bootTime = 0;
 unsigned long lastActivity = 0;
 unsigned long k230StartTime = 0;
 bool k230IsRunning = false;
+bool share_analytics = false;
+bool notify_motion = false;
+
+uint8_t authFail = 0;
 String passcodeBuffer = "";
 
 // Function Prototypes
@@ -69,6 +77,12 @@ void serverLog(String);
 void mqttCallback(char *, byte *, unsigned int);
 void reconnectMQTT();
 void endMQTTSession();
+
+struct HTTPResponse {
+  int code;
+  const char *contentType;
+  String body;
+};
 
 void setup() {
   Serial.begin(115200);
@@ -115,6 +129,13 @@ void loop() {
     }
   }
 
+  if (authTimeout) {
+    if (millis() >= authTimeout + AUTH_DISABLE_TIME) {
+      authTimeout = 0;
+      authFail = 0;
+    }
+  }
+
   // K230D Power Management (5s timeout logic)
   if (k230IsRunning && (millis() - k230StartTime > 5000)) {
     Serial.println("K230D Timeout: No face detected. Powering down.");
@@ -128,7 +149,8 @@ void loop() {
 void handlePIR() {
   if (digitalRead(PIR_PIN) == HIGH && !k230IsRunning) {
     delay(50);  // Debounce
-    FCM_Notification("Motion Detected", "Waking up Vision System...");
+    if (notify_motion)
+      FCM_Notification("Motion Detected", "Waking up Vision System...");
     wakeK230D();
   }
 }
@@ -149,8 +171,8 @@ void K230DPowerOff() {
 
 void unlockDoor(String source) {
   FCM_Notification("Lock Status", "Unlocked by " + source);
-  // NOTE: Lock is Fail-secure (HIGH = Open), Adjust as needed if fail-safe or other type
-  digitalWrite(LOCK_PIN, HIGH);   // Activate Solenoid  
+  // Fail-secure lock logic, Adjust logic for your lock type
+  digitalWrite(LOCK_PIN, HIGH);   // Activate Solenoid
   delay(3000);                   // Pulse duration
   digitalWrite(LOCK_PIN, LOW);  // Deactivate
 }
@@ -266,10 +288,11 @@ void initialCommisioning() {
   String WIFI_SSID = prefs.getString("wifi-ssid");
   String WIFI_PWD = prefs.getString("wifi-pwd");
 
-  if (WIFI_SSID == "" || WIFI_PWD == "") {
+  if (WIFI_SSID == "") {
     // Start Matter or BLE provisioning to get Wi-Fi, lock and user credentials
 
     LOCK_NAME = "lock";
+    OWNER_NAME = "owner";
     String PIN = "1234";
     
     prefs.putString("wifi-ssid", "Your_SSID");
@@ -331,10 +354,120 @@ void serverLog(String log) {
   }
 }
 
+void handleRequest(String route, HTTPMethod method, std::function<HTTPResponse(const String &)> callback) {
+  localServer.on(route, method, [route, callback]() {
+    String body = "";
+    if (localServer.hasArg("plain")) {
+      body = localServer.arg("plain");  // get POST body
+      Serial.println("Received body: " + body);
+    } else {
+      Serial.print("At route " + route);
+      Serial.println(" No body received");
+    }
+    HTTPResponse resp = callback(body);
+    if (resp.code == 0 && resp.contentType == "") resp = HTTPResponse{ 200, "text/plain", String("") };
+    localServer.send(resp.code, resp.contentType, resp.body.c_str());
+  });
+}
+
+// name, id, value, pin settings: "lock-name", "pin"
+bool validateSettings(const char *setting) {
+  String settings[] = { "motion-sensitivity", "vid-quality", "call-timeout", "snippet-time", "share-analytics" };
+  for (String option : settings) {
+    if (option.equals(setting))
+      return true;
+  }
+  return false;
+}
+
+HTTPResponse updateSettings(String body) {
+  if (authFail == 3) {
+    return HTTPResponse{ 401, "application/json", ("{\"status\":\"fail\", \"error\":\"Authorization Timeout\", \"timeRemaining\": " + String((AUTH_DISABLE_TIME - (millis() - authTimeout)) / 60000UL) + "}") };
+  }
+  JsonDocument data;
+  DeserializationError error = deserializeJson(data, body);
+  if (error) {
+    return HTTPResponse{ 400, "application/json", "{\"status\":\"fail\", \"error\":\"Parsing failed. Try Again.\"}" };
+  }
+
+  String name = data["name"];
+  long time = data["time"];  // 1351824120
+
+  JsonObject settings = data["settings"];
+  int motion_sensitivity = settings["motion-sensitivity"];   // 80
+  int vid_quality = settings["vid-quality"];                 // 1024
+  int call_timeout = settings["call-timeout"];               // 40
+  int snippet_time = settings["snippet-time"];               // 15
+  notify_motion = settings["notify-motion"];                 // true
+  share_analytics = settings["share-analytics"];             // true
+
+  if (!checkPin(data["pin"].as<const char *>()) || !name.equals(OWNER_NAME)) {
+    authFail += 1;
+    if (authFail == 3) {
+      authTimeout = millis();
+    }
+    return HTTPResponse{ 401, "application/json", "{\"status\":\"fail\", \"error\":\"Unauthorized Access\"}" };
+  }
+  if (name && settings) {
+    for (JsonPair kvp : settings) {
+      String option = String(kvp.key().c_str());
+      if (validateSettings(option.c_str()))
+        continue;
+      else {
+        return HTTPResponse{ 400, "application/json", "{\"status\":\"fail\", \"error\":\"Unknown settings. May need firmware update\"}" };
+      }
+
+      uint value = (uint) kvp.value() | prefs.getUInt(option.c_str());
+      prefs.putUInt(option.c_str(), value); // Write settings to non-volatile storage
+      if (option.equals("lock-name")) {
+        FCM_Notification("Change Lock Name", name + " changed " + OWNER_NAME + "'s " + LOCK_NAME + " to " + value + ".");
+      } else if(option.equals("call-timeout")) {
+        wakeK230D("{\"cmd\":\"set_call_timeout\", \"call-timeout\": " + String(value) + "}");
+      } else if(option.equals("snippet-time")) {
+        wakeK230D("{\"cmd\":\"set_snippet_time\", \"snippet-time\": " + String(value) + "}");
+      } else if (option.equals("vid-quality")) {
+        wakeK230D("{\"cmd\":\"set_vid_quality\", \"vid-quality\": " + String(value) + "}");
+      } else if (option.equals("pin")) {
+        FCM_Notification("Pin changed", name + " changed " + OWNER_NAME + "'s " + LOCK_NAME + "pin.");
+      }
+
+      if (share_analytics) {
+        String json;
+        serializeJson(settings, json);
+        json = "{type: \"settings\"," + json + "}";
+        serverLog(json.c_str());
+      }
+    }
+    return HTTPResponse{ 200, "application/json", "{\"status\":\"success\"}" };
+  } else {
+    return HTTPResponse{ 400, "application/json", "{\"status\":\"fail\", \"error\":\"Bad request.\"}" };
+  }
+}
+
 void setupREST() {
-  localServer.on("/unlock", HTTP_POST, []() {
-    unlockDoor("Local REST API");
-    localServer.send(200, "application/json", "{\"status\":\"success\"}");
+  handleRequest("/unlock", HTTP_POST, [](String body) {
+    JsonDocument data;
+    DeserializationError error = deserializeJson(data, body);
+    if (error) {
+      return HTTPResponse{ 400, "application/json", "{\"status\":\"fail\", \"error\":\"Parsing failed. Try again\" }" };
+    }
+    if (checkPin(data["pin"].as<const char *>())) {
+      unlockDoor(data["name"]);
+      return HTTPResponse{ 200, "application/json", "{\"status\":\"success\"}" };
+    } else {
+      return HTTPResponse{ 401, "application/json", "{\"status\":\"fail\", \"error\":\"Wrong pin stored, pin may have been updated\" }" };
+    }
+  });
+
+  handleRequest("/update-settings", HTTP_PATCH, &updateSettings);
+  handleRequest("/status", HTTP_GET, [](String body) {
+    String status = "{";
+    status += "\"lock-name\":\"" + LOCK_NAME + "\",";
+    status += "\"owner-name\":\"" + OWNER_NAME + "\",";
+    status += "\"wifi-ssid\":\"" + prefs.getString("wifi-ssid") + "\",";
+    status += "\"battery-voltage\":\"" + String((analogRead(BATTERY_PIN) / 4095.0) * 3.3 * (12.0 / 3.3), 2) + "\",";
+    status += "}";
+    return HTTPResponse{ 200, "application/json", status };
   });
   localServer.begin();
 }
