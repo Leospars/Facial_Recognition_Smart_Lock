@@ -19,15 +19,8 @@
 #define LOCK_PIN 24
 #define K230D_PWR_PIN 23
 #define BATTERY_PIN 0
-#define TOUCH_CS 10
 
-// Display PINS
-#define TFT_MISO 2
-#define TFT_MOSI 7
-#define TFT_SCLK 6
-#define TFT_CS 1    // Chip select control pin
-#define TFT_DC 5    // Data Command control pin
-#define TFT_RST -1  // Set TFT_RST to -1 if display RESET is connected to ESP32 board RST
+// Display PINS initialized in User_Setup.h of TFT_eSPI Library
 
 // --- Configuration & Credentials ---
 const char *fcm_server = "fcm.googleapis.com";
@@ -35,10 +28,10 @@ const char *fcm_key = "YOUR_FCM_SERVER_KEY";  // Legacy Key or OAuth2 Relay
 const char *mqtt_server = "broker.hivemq.com";
 
 #define LOCK_ID "c0ffee00-1234-4abc-9def-9876543210aa"  // Unique Lock Identifier UUIDv7
-#define AUTH_DISABLE_TIME 30 * 60000UL   // 30 minutes
-#define COMMISSION_TIME 5 * 60000UL      // 5 minutes
-#define MQTT_ACTIVE_TIMEOUT 2 * 60000UL  // 2 minutes
-#define K230D_MAX_UPTIME 3000UL          // 3 seconds
+#define AUTH_DISABLE_TIME 30 * 60000UL                  // 30 minutes
+#define COMMISSION_TIME 5 * 60000UL                     // 5 minutes
+#define MQTT_ACTIVE_TIMEOUT 2 * 60000UL                 // 2 minutes
+#define K230D_MAX_UPTIME 3000UL                         // 3 seconds
 
 // --- Instances ---
 TFT_eSPI tft = TFT_eSPI();
@@ -334,10 +327,10 @@ void initialCommisioning() {
   // If credentials not in NVS, wait for BLE commissioning
   if (WIFI_SSID.isEmpty()) {
     Serial.println("Waiting for BLE commissioning payload to complete...");
-    
+
     unsigned long commissionStart = millis();
     while (millis() - commissionStart < COMMISSION_TIME) {
-      delay(100); // Avoid busy loop
+      delay(100);  // Avoid busy loop
       if (bleServer.hasReceivedPayload()) {
         WIFI_SSID = prefs.getString("wifi-ssid");
         WIFI_PWD = prefs.getString("wifi-pwd");
@@ -347,7 +340,7 @@ void initialCommisioning() {
         break;
       }
     }
-    
+
     if (WIFI_SSID.isEmpty()) {
       Serial.println("Commission timeout. Restarting...");
       ESP.deepSleep(0);
@@ -358,14 +351,14 @@ void initialCommisioning() {
   // Connect to WiFi
   Serial.println("Connecting to WiFi: " + WIFI_SSID);
   WiFi.begin(WIFI_SSID.c_str(), WIFI_PWD.c_str());
-  
+
   unsigned long wifiStartTime = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - wifiStartTime < 20000) {
     delay(500);
     Serial.print(".");
   }
   Serial.println();
-  
+
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("WiFi connection failed. Restarting...");
     bleServer.sendResponse("{\"status\":\"wifi_fail\"}");
@@ -373,19 +366,18 @@ void initialCommisioning() {
     ESP.deepSleep(200000); // Restart after 0.2 seconds
     return;
   }
-  
+
   Serial.println("WiFi connected!");
   Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
-  
-  String simpleId = String(LOCK_ID).substring(0,4);
+
+  String simpleId = String(LOCK_ID).substring(0, 4);
   simpleId.toUpperCase();
-  WiFi.setHostname(("JUPY_" + LOCK_NAME + simpleId).c_str()); // Set local hostname
+  WiFi.setHostname(("JUPY_" + LOCK_NAME + simpleId).c_str());  // Set local hostname
   Serial.println("Hostname set to: JUPY_" + LOCK_NAME);
-  
+
   // Send lock info via BLE TX characteristic (after WiFi is connected)
-  bleServer.sendResponse("{\"lock-id\":\"" + String(LOCK_ID) + \
-                        "\",\"lock-ip\":\"" + WiFi.localIP().toString() + "\"}");
+  bleServer.sendResponse("{\"lock-id\":\"" + String(LOCK_ID) + "\",\"lock-ip\":\"" + WiFi.localIP().toString() + "\"}");
 
   // --- CRITICAL POWER SAVING MODES ---
   esp_wifi_set_ps(WIFI_PS_MIN_MODEM);  // 1. Enable Wi-Fi Modem Sleep
