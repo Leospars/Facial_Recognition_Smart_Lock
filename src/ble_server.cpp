@@ -96,14 +96,20 @@ void RxCharacteristicCallbacks::onWrite(BLECharacteristic* pCharacteristic) {
   // Validate required fields
   if (!doc.containsKey("user-id") || !doc.containsKey("wifi-ssid") || 
       !doc.containsKey("wifi-pwd") || !doc.containsKey("lock-name") || 
-      !doc.containsKey("owner-name") || !doc.containsKey("pin")) {
+      !doc.containsKey("owner-name") || !doc.containsKey("pin") ||
+      !doc.containsKey("pairing-code")) {
     Serial.println("[BLE] Missing required fields");
     return;
   }
   
-  // Store in NVS
   Preferences prefs;
   prefs.begin("my-storage", false);
+  if( !doc["pairing-code"].as<String>().equals(prefs.getString("pairing-code"))) {
+    Serial.println("[BLE] Invalid pairing code");
+    return;
+  }
+  
+  // Store in NVS
   prefs.putString("user-id", doc["user-id"].as<String>());
   prefs.putString("wifi-ssid", doc["wifi-ssid"].as<String>());
   prefs.putString("wifi-pwd", doc["wifi-pwd"].as<String>());

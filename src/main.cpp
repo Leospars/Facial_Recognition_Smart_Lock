@@ -110,6 +110,7 @@ void setup() {
   prefs.begin("my-storage", false);
 
   // 1. Start BLE Server for commissioning
+  prefs.putString("pairing-code", "A1B2C3");
   bleServer.begin("JUPY_SmartLock");
 
   // 2. Matter/BLE Provisioning & Transition
