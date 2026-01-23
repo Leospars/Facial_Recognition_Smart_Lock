@@ -99,9 +99,23 @@ struct HTTPResponse {
   String body;
 };
 
+void wakeUpReason() {
+  esp_sleep_wakeup_cause_t wakeup_reason = esp_sleep_get_wakeup_cause();
+  if (wakeup_reason == ESP_SLEEP_WAKEUP_EXT1) {
+    Serial.println("Woke up from PIR or Button!");
+  } else if (wakeup_reason == ESP_SLEEP_WAKEUP_TOUCHPAD) {
+    Serial.println("Woke up from Touch!");
+  } else if (wakeup_reason == ESP_SLEEP_WAKEUP_TIMER) {
+    Serial.println("Woke up from Timer!");
+  } else {
+    Serial.println("Natural first wakeup. Not waking from deep sleep");
+  }
+}
+
 void setup() {
   Serial.begin(115200);
 
+  wakeUpReason();
   pinMode(PIR_PIN, INPUT);
   pinMode(LOCK_PIN, OUTPUT);
   pinMode(K230D_PWR_PIN, OUTPUT);
@@ -182,6 +196,34 @@ void K230DPowerOff() {
   serverLog("{\"event\": \"power_off\", \"uptime\": \"" + String(k230UpTime / 1000) + "\"}");
   k230UpTime = 0;
   Serial.println("K230D Powered Off.");
+}
+
+void startDeepSleep(unsigned long milli_sec = 0) {
+  // Shutdown WiFi
+  esp_wifi_stop();
+  esp_wifi_deinit();
+
+  // Shutdown Bluetooth
+  btStop();
+  esp_bt_controller_disable();
+  esp_bt_controller_deinit();
+
+  Serial.println("Radios gracefully shut down.");
+
+  // 1. Enable EXT1 Wakeup (PIR on Pin 7, Button on Pin 0)
+  // Note: All pins in this call must share the same level (e.g., HIGH)
+  // If Button is pull-up (LOW when pressed), it needs an inverter to work with PIR (HIGH)
+  uint64_t pin_mask = (1ULL << PIR_PIN) | (1ULL << BUTTON_PIN);
+  esp_sleep_enable_ext1_wakeup(pin_mask, ESP_EXT1_WAKEUP_ANY_HIGH);
+
+  // 2. Enable Touch Wakeup using touch interrupt pin
+  esp_sleep_enable_ext0_wakeup((gpio_num_t)T_IRQ, 0);  // 0 = Wake on LOW level
+
+  // 3. Timer wakeup if time given else pin interrupt wakeup
+  if (milli_sec > 0) esp_sleep_enable_timer_wakeup(milli_sec * 1000ULL);
+  
+  Serial.println("Entering Deep Sleep now...");
+  esp_deep_sleep_start();
 }
 
 void handleTimeouts() {
@@ -385,8 +427,8 @@ void initialCommisioning() {
     }
 
     if (WIFI_SSID.isEmpty()) {
-      Serial.println("Commission timeout. Restarting...");
-      ESP.deepSleep(0);
+      Serial.println("Commission timeout. Require Restart...");
+      startDeepSleep();
       return;
     }
   }
@@ -406,6 +448,7 @@ void initialCommisioning() {
     Serial.println("WiFi connection failed. Restarting...");
     prefs.clear();  // Discard BLE message
     bleServer.sendResponse("{\"status\":\"wifi_fail\"}");
+    startDeepSleep(200);
     return;
   }
 
@@ -416,8 +459,8 @@ void initialCommisioning() {
   if (!registerLock(prefs.getString("token"))) {
     prefs.clear();
     bleServer.sendResponse("{\"error\":\"Failed to register Lock\"}");
-    Serial.println("Commission timeout. Restarting...");
-    ESP.deepSleep(0);
+    Serial.println("Registering lock failed.");
+    startDeepSleep();
   }
 
   String simpleId = String(LOCK_ID).substring(0, 4);
