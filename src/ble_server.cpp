@@ -12,7 +12,8 @@ BLECommissioningServer::~BLECommissioningServer() {
 
 void BLECommissioningServer::begin(const char* deviceName) {
   BLEDevice::init(deviceName);
-  
+  BLEDevice::setMTU(517);
+
   pServer = BLEDevice::createServer();
   pServer->setCallbacks(new ServerCallbacks(this));
   
@@ -89,6 +90,7 @@ void RxCharacteristicCallbacks::onWrite(BLECharacteristic* pCharacteristic) {
   DeserializationError error = deserializeJson(doc, payload);
   
   if (error) {
+    bleServer->sendResponse("{\"error\":\"JSON parse error\"}");
     Serial.println("[BLE] JSON parse error");
     return;
   }
@@ -96,15 +98,17 @@ void RxCharacteristicCallbacks::onWrite(BLECharacteristic* pCharacteristic) {
   // Validate required fields
   if (!doc.containsKey("user-id") || !doc.containsKey("wifi-ssid") || 
       !doc.containsKey("wifi-pwd") || !doc.containsKey("lock-name") || 
-      !doc.containsKey("owner-name") || !doc.containsKey("pin") ||
-      !doc.containsKey("pairing-code")) {
-    Serial.println("[BLE] Missing required fields");
+      !doc.containsKey("owner") || !doc.containsKey("pin") ||
+      !doc.containsKey("pairing-code") || !doc.containsKey("token")) {
+        bleServer->sendResponse("{\"error\":\"Missing required fields\"}");
+        Serial.println("[BLE] Missing required fields");
     return;
   }
   
   Preferences prefs;
   prefs.begin("my-storage", false);
   if( !doc["pairing-code"].as<String>().equals(prefs.getString("pairing-code"))) {
+    bleServer->sendResponse("{\"error\":\"Invalid pairing code\"}");
     Serial.println("[BLE] Invalid pairing code");
     return;
   }
@@ -114,7 +118,8 @@ void RxCharacteristicCallbacks::onWrite(BLECharacteristic* pCharacteristic) {
   prefs.putString("wifi-ssid", doc["wifi-ssid"].as<String>());
   prefs.putString("wifi-pwd", doc["wifi-pwd"].as<String>());
   prefs.putString("lock-name", doc["lock-name"].as<String>());
-  prefs.putString("owner-name", doc["owner-name"].as<String>());
+  prefs.putString("owner", doc["owner"].as<String>());
+  prefs.putString("token", doc["token"].as<String>());
   prefs.putString("pin", doc["pin"].as<String>());
   prefs.end();
   
