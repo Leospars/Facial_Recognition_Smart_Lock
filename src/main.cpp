@@ -9,11 +9,10 @@
 // #include <MatterEndPoint.h>
 #include <Preferences.h>
 #include <TFT_eSPI.h>
-
-#include "esp_bt.h"
-// #include "esp_bt_main.h"
 #include <esp_wifi.h>
+
 #include "ble_server.h"
+#include "esp_bt.h"
 
 // --- Pins (As specified) ---
 #define PIR_PIN 26
@@ -35,6 +34,7 @@ const char *cloud_endpoint = ("http://" + String(laptop_ip) + ":3000/api/lock").
 #define LOCK_ID "c0ffee00-1234-4abc-9def-9876543210aa"  // Unique Lock Identifier UUIDv7
 #define LOCK_MODEL "JUPY Block Pro"                     // Lock Model
 #define FIRMWARE_VERSION "v1.0"                         // Firmware version
+#define PAIRING_CODE "A1B2C3"                           // Lock Pairing Code
 #define AUTH_DISABLE_TIME 30 * 60000UL                  // 30 minutes
 #define COMMISSION_TIME 10 * 60000UL                    // 10 minutes
 #define MQTT_ACTIVE_TIMEOUT 2 * 60000UL                 // 2 minutes
@@ -64,6 +64,7 @@ unsigned long faceUnlockTimeout = 0;
 unsigned long lastActivity = 0;
 unsigned long k230StartTime = 0;
 unsigned long k230UpTime = 0;
+unsigned long lastBatCheck = 0;
 
 bool k230IsRunning = false;
 bool pinManuallyEntered = false;
@@ -81,7 +82,7 @@ void handleTouch();
 void handleTimeouts();
 void monitorBattery();
 void initialCommisioning();
-void wakeK230D(String command = "{\"cmd\":\"On\"}");
+void wakeK230D(String command = "{\"cmd\":\"on\"}");
 
 bool checkPin(const char *);
 void unlockDoor(String);
@@ -130,10 +131,10 @@ void setup() {
   drawKeypad();
 
   // 0. Initialize Storage
-  prefs.begin("my-storage", false);
+  prefs.begin("my_storage", false);
 
   // 1. Start BLE Server for commissioning
-  prefs.putString("pairing-code", "A1B2C3");
+  prefs.putString("pairing_code", PAIRING_CODE);
   bleServer.begin("JUPY Lock Pro");
 
   // 2. Matter/BLE Provisioning & Transition
@@ -172,8 +173,7 @@ void loop() {
 void handlePIR() {
   if (digitalRead(PIR_PIN) == HIGH && !k230IsRunning) {
     delay(50);  // Debounce
-    if (notify_motion)
-      FCM_Notification("Motion Detected", "Waking up Vision System...");
+    if (notify_motion) FCM_Notification("Motion Detected", "Waking up Vision System...");
     wakeK230D();
   }
 }
@@ -181,7 +181,7 @@ void handlePIR() {
 void wakeK230D(String command) {
   digitalWrite(K230D_PWR_PIN, HIGH);
   if (faceUnlockTimeout) {
-    command.replace("}", ", \"face-timeout\": true }");
+    command.replace("}", ", \"face_timeout\": true }");
     // Disable camera on start up and skip face recog code,
     // but if doorbell request then enable camera on K230D side
   }
@@ -221,7 +221,7 @@ void startDeepSleep(unsigned long milli_sec = 0) {
 
   // 3. Timer wakeup if time given else pin interrupt wakeup
   if (milli_sec > 0) esp_sleep_enable_timer_wakeup(milli_sec * 1000ULL);
-  
+
   Serial.println("Entering Deep Sleep now...");
   esp_deep_sleep_start();
 }
@@ -285,7 +285,8 @@ void handleUART() {
 
       if (status == "match") {
         unlockDoor(doc["name"]);
-        serverLog("{\"event\": \"unlock\", \"method\": \"face\", \"success\": \"true\", \"name\": \"" + doc["name"].as<String>() + "\"}");
+        serverLog("{\"event\": \"unlock\", \"method\": \"face\", \"success\": \"true\", \"name\": \"" +
+                  doc["name"].as<String>() + "\"}");
         K230DPowerOff();
       } else if (status == "intruder") {
         FCM_Notification("Intruder Alert!", "Unknown face detected at door.");
@@ -307,54 +308,45 @@ void handleUART() {
   }
 }
 
+uint8_t getBatteryLevel() {
+  int raw = analogRead(BATTERY_PIN);
+  float sumVolt = 0;
+  for (uint8_t i = 0; i < 10; i++) {
+    sumVolt += (raw / 4095.0) * 3.3 * (12.0 / 3.3);  // Adjust for your voltage divider
+  }
+  float voltage = sumVolt / 10;
+  int scaled = (int)(voltage * 100);
+  switch (scaled) {
+    case 1260 ... 1300:  // 12.6+ volts
+      return 100;
+    case 1250: return 90;
+    case 1242: return 80;
+    case 1232: return 70;
+    case 1220: return 60;
+    case 1206: return 50;
+    case 1190: return 40;
+    case 1175: return 30;
+    case 1158: return 20;
+    case 1131: return 10;
+    case 1050: return 0;
+    default: return 0;
+  }
+}
+
 void monitorBattery() {
-  static unsigned long lastBatCheck = 0;
-  if (millis() - lastBatCheck > 180000) {  // Check every 3 minutes
-    int raw = analogRead(BATTERY_PIN);
-    float sumVolt = 0;
-    for (uint8_t i = 0; i < 10; i++) {
-      sumVolt += (raw / 4095.0) * 3.3 * (12.0 / 3.3);  // Adjust for your voltage divider
-    }
-    float voltage = sumVolt / 10;
-    int scaled = (int)(voltage * 100);
-    switch (scaled) {
-      case 1260 ... 1300:  // 12.6+ volts
-        FCM_Notification("Lock Battery", "{\"battery\": 100%}");
-        break;
-      case 1250:
-        FCM_Notification("Lock Battery", "{\"battery\": 90%}");
-        break;
-      case 1242:
-        FCM_Notification("Lock Battery", "{\"battery\": 80%}");
-        break;
-      case 1232:
-        FCM_Notification("Lock Battery", "{\"battery\": 70%}");
-        break;
-      case 1220:
-        FCM_Notification("Lock Battery", "{\"battery\": 60%}");
-        break;
-      case 1206:
-        FCM_Notification("Lock Battery", "{\"battery\": 50%}");
-        break;
-      case 1190:
-        FCM_Notification("Lock Battery", "{\"battery\": 40%}");
-        break;
-      case 1175:
-        FCM_Notification("Lock Battery", "{\"battery\": 30%}");
-        break;
-      case 1158:
+  if (millis() - lastBatCheck > 15 * 60000ULL) {  // Check every 15 minutes
+    uint8_t batLevel = getBatteryLevel();
+    switch (batLevel) {
+      case 20:
         FCM_Notification("Low Battery", "{\"battery\": 20%}");
         FCM_Notification("Low Battery", "{\"warning\": \"Battery Low. Charge battery soon.\"}");
         break;
-      case 1131:
+      case 10:
         FCM_Notification("Low Battery", "{\"battery\": 10%}");
         FCM_Notification("Low Battery", "{\"warning\": \"Battery Low. Charge battery.\"}");
         break;
-      case 1050:
-        FCM_Notification("Low Battery", "{\"warning\": \"Battery depleted. Recharge Now!\"}");
-        break;
-      default:
-        FCM_Notification("Low Battery", "{\"error\": \"Voltage out of range\"}");
+      case 0: FCM_Notification("Low Battery", "{\"warning\": \"Battery depleted. Recharge Now!\"}"); break;
+      default: FCM_Notification("Lock Battery", "{\"battery\": " + String(batLevel) + "%}");
     }
     lastBatCheck = millis();
   }
@@ -366,7 +358,8 @@ void FCM_Notification(String title, String body) {
   WiFiClientSecure client;
   client.setInsecure();
   if (client.connect(fcm_server, 443)) {
-    String payload = "{\"to\":\"/topics/" + USER_ID + "/all\", \"priority\":\"high\", \"notification\":{\"title\":\"" + title + "\", \"body\":\"" + body + "\"}}";
+    String payload = "{\"to\":\"/topics/" + USER_ID + "/all\", \"priority\":\"high\", \"notification\":{\"title\":\"" +
+                     title + "\", \"body\":\"" + body + "\"}}";
     client.println("POST /fcm/send HTTP/1.1");
     client.println("Authorization: key=" + String(fcm_key));
     client.println("Content-Type: application/json");
@@ -385,7 +378,9 @@ bool registerLock(String token) {
   http.begin(url);
   http.addHeader("Content-Type", "application/json");
   http.addHeader("Authorization", "Bearer " + token);
-  String body = "{\"userId\":\"" + USER_ID + "\", \"lockId\":\"" + LOCK_ID + "\",\"lockName\":\"" + LOCK_NAME + "\",\"owner\":\"" + OWNER_NAME + "\",\"model\":\"" + String(LOCK_MODEL) + "\",\"firmwareVersion\":\"" + String(FIRMWARE_VERSION) + "\"}";
+  String body = "{\"userId\":\"" + USER_ID + "\", \"lockId\":\"" + LOCK_ID + "\",\"lockName\":\"" + LOCK_NAME +
+                "\",\"owner\":\"" + OWNER_NAME + "\",\"model\":\"" + String(LOCK_MODEL) + "\",\"firmwareVersion\":\"" +
+                String(FIRMWARE_VERSION) + "\"}";
   Serial.printf("Post Data: %s", body.c_str());
   int httpResponseCode = http.POST(body);
 
@@ -406,8 +401,8 @@ bool registerLock(String token) {
 }
 
 void initialCommisioning() {
-  String WIFI_SSID = prefs.getString("wifi-ssid");
-  String WIFI_PWD = prefs.getString("wifi-pwd");
+  String WIFI_SSID = prefs.getString("wifi_ssid");
+  String WIFI_PWD = prefs.getString("wifi_pwd");
 
   // If credentials not in NVS, wait for BLE commissioning
   if (WIFI_SSID.isEmpty()) {
@@ -417,10 +412,10 @@ void initialCommisioning() {
     while (millis() - commissionStart < COMMISSION_TIME) {
       delay(100);  // Avoid busy loop
       if (bleServer.hasReceivedPayload()) {
-        WIFI_SSID = prefs.getString("wifi-ssid");
-        WIFI_PWD = prefs.getString("wifi-pwd");
-        USER_ID = prefs.getString("user-id");
-        LOCK_NAME = prefs.getString("lock-name");
+        WIFI_SSID = prefs.getString("wifi_ssid");
+        WIFI_PWD = prefs.getString("wifi_pwd");
+        USER_ID = prefs.getString("user_id");
+        LOCK_NAME = prefs.getString("lock_name");
         OWNER_NAME = prefs.getString("owner");
         break;
       }
@@ -469,7 +464,8 @@ void initialCommisioning() {
   Serial.println("Hostname set to: JUPY_" + LOCK_NAME);
 
   // Send lock info via BLE TX characteristic (after WiFi is connected)
-  bleServer.sendResponse("{\"lock-id\":\"" + String(LOCK_ID) + "\",\"lock-ip\":\"" + WiFi.localIP().toString() + "\",hostname\":\"" + String(WiFi.getHostname()) + "\"}");
+  bleServer.sendResponse("{\"lock_id\":\"" + String(LOCK_ID) + "\",\"lock_ip\":\"" + WiFi.localIP().toString() +
+                         "\",hostname\":\"" + String(WiFi.getHostname()) + "\"}");
 
   // --- CRITICAL POWER SAVING MODES ---
   esp_wifi_set_ps(WIFI_PS_MIN_MODEM);  // 1. Enable Wi-Fi Modem Sleep
@@ -507,12 +503,13 @@ void mqttCallback(char *topic, byte *payload, unsigned int length) {
   deserializeJson(doc, payload);
 
   if (doc["cmd"] == "unlock") unlockDoor("Remote App");
-  else if (doc["cmd"] == "start_call") wakeK230D("{\"cmd\":\"start_call\", \"room-id\":\"" + doc["room-id"].as<String>() + "\"}");
+  else if (doc["cmd"] == "start_call")
+    wakeK230D("{\"cmd\":\"start_call\",\"room_id\":\"" + doc["room_id"].as<String>() + "\"}");
   else if (doc["cmd"] == "end_call") endMQTTSession();
 }
 
 void serverLog(String log) {
-  //TODO: User database logging instead via post request instead of MQTT
+  // TODO: User database logging instead via post request instead of MQTT
   if (mqttActive) {
     mqttClient.publish(("lock/logs/" + USER_ID).c_str(), log.c_str());
   }
@@ -529,68 +526,69 @@ void handleRequest(String route, HTTPMethod method, std::function<HTTPResponse(c
       Serial.println(" No body received");
     }
     HTTPResponse resp = callback(body);
-    if (resp.code == 0 && resp.contentType == "") resp = HTTPResponse{ 200, "text/plain", String("") };
+    if (resp.code == 0 && resp.contentType == "") resp = HTTPResponse{200, "text/plain", String("")};
     localServer.send(resp.code, resp.contentType, resp.body.c_str());
   });
 }
 
-// name, id, value, pin settings: "lock-name", "pin"
 bool validateSettings(const char *setting) {
-  String settings[] = { "motion-sensitivity", "vid-quality", "call-timeout", "snippet-time", "share-analytics" };
+  String settings[] = {"motion_sensitivity", "vid_quality", "call_timeout", "snippet_time", "share_analytics"};
   for (String option : settings) {
-    if (option.equals(setting))
-      return true;
+    if (option.equals(setting)) return true;
   }
   return false;
 }
 
 HTTPResponse updateSettings(String body) {
   if (authFail == 3) {
-    return HTTPResponse{ 401, "application/json", ("{\"status\":\"fail\", \"error\":\"Authorization Timeout\", \"timeRemaining\": " + String((AUTH_DISABLE_TIME - (millis() - authTimeout)) / 60000UL) + "}") };
+    return HTTPResponse{401, "application/json",
+                        ("{\"status\":\"fail\", \"error\":\"Authorization Timeout\", \"timeRemaining\": " +
+                         String((AUTH_DISABLE_TIME - (millis() - authTimeout)) / 60000UL) + "}")};
   }
   JsonDocument data;
   DeserializationError error = deserializeJson(data, body);
   if (error) {
-    return HTTPResponse{ 400, "application/json", "{\"status\":\"fail\", \"error\":\"Parsing failed. Try Again.\"}" };
+    return HTTPResponse{400, "application/json", "{\"status\":\"fail\", \"error\":\"Parsing failed. Try Again.\"}"};
   }
 
   String name = data["name"];
   long time = data["time"];  // 1351824120
 
   JsonObject settings = data["settings"];
-  int motion_sensitivity = settings["motion-sensitivity"];  // 80
-  int vid_quality = settings["vid-quality"];                // 1024
-  int call_timeout = settings["call-timeout"];              // 40
-  int snippet_time = settings["snippet-time"];              // 15
-  notify_motion = settings["notify-motion"];                // true
-  share_analytics = settings["share-analytics"];            // true
+  int motion_sensitivity = settings["motion_sensitivity"];  // 80
+  int vid_quality = settings["vid_quality"];                // 1024
+  int call_timeout = settings["call_timeout"];              // 40
+  int snippet_time = settings["snippet_time"];              // 15
+  notify_motion = settings["notify_motion"];                // true
+  share_analytics = settings["share_analytics"];            // true
 
   if (!checkPin(data["pin"].as<const char *>()) || !name.equals(OWNER_NAME)) {
     authFail += 1;
     if (authFail == 3) {
       authTimeout = millis();
     }
-    return HTTPResponse{ 401, "application/json", "{\"status\":\"fail\", \"error\":\"Unauthorized Access\"}" };
+    return HTTPResponse{401, "application/json", "{\"status\":\"fail\", \"error\":\"Unauthorized Access\"}"};
   }
   if (name && settings) {
     for (JsonPair kvp : settings) {
       String option = String(kvp.key().c_str());
-      if (validateSettings(option.c_str()))
-        continue;
+      if (validateSettings(option.c_str())) continue;
       else {
-        return HTTPResponse{ 400, "application/json", "{\"status\":\"fail\", \"error\":\"Unknown settings. May need firmware update\"}" };
+        return HTTPResponse{400, "application/json",
+                            "{\"status\":\"fail\", \"error\":\"Unknown settings. May need firmware update\"}"};
       }
 
       uint value = (uint)kvp.value() | prefs.getUInt(option.c_str());
       prefs.putUInt(option.c_str(), value);  // Write settings to non-volatile storage
-      if (option.equals("lock-name")) {
-        FCM_Notification("Change Lock Name", name + " changed " + OWNER_NAME + "'s " + LOCK_NAME + " to " + value + ".");
-      } else if (option.equals("call-timeout")) {
-        wakeK230D("{\"cmd\":\"set_call_timeout\", \"call-timeout\": " + String(value) + "}");
-      } else if (option.equals("snippet-time")) {
-        wakeK230D("{\"cmd\":\"set_snippet_time\", \"snippet-time\": " + String(value) + "}");
-      } else if (option.equals("vid-quality")) {
-        wakeK230D("{\"cmd\":\"set_vid_quality\", \"vid-quality\": " + String(value) + "}");
+      if (option.equals("lock_name")) {
+        FCM_Notification("Change Lock Name",
+                         name + " changed " + OWNER_NAME + "'s " + LOCK_NAME + " to " + value + ".");
+      } else if (option.equals("call_timeout")) {
+        wakeK230D("{\"cmd\":\"set_call_timeout\",\"call_timeout\": " + String(value) + "}");
+      } else if (option.equals("snippet_time")) {
+        wakeK230D("{\"cmd\":\"set_snippet_time\",\"snippet_time\": " + String(value) + "}");
+      } else if (option.equals("vid_quality")) {
+        wakeK230D("{\"cmd\":\"set_vid_quality\",\"vid_quality\": " + String(value) + "}");
       } else if (option.equals("pin")) {
         FCM_Notification("Pin changed", name + " changed " + OWNER_NAME + "'s " + LOCK_NAME + "pin.");
       }
@@ -602,9 +600,9 @@ HTTPResponse updateSettings(String body) {
         serverLog(json.c_str());
       }
     }
-    return HTTPResponse{ 200, "application/json", "{\"status\":\"success\"}" };
+    return HTTPResponse{200, "application/json", "{\"status\":\"success\"}"};
   } else {
-    return HTTPResponse{ 400, "application/json", "{\"status\":\"fail\", \"error\":\"Bad request.\"}" };
+    return HTTPResponse{400, "application/json", "{\"status\":\"fail\", \"error\":\"Bad request.\"}"};
   }
 }
 
@@ -613,25 +611,25 @@ void setupREST() {
     JsonDocument data;
     DeserializationError error = deserializeJson(data, body);
     if (error) {
-      return HTTPResponse{ 400, "application/json", "{\"status\":\"fail\", \"error\":\"Parsing failed. Try again\" }" };
+      return HTTPResponse{400, "application/json", "{\"status\":\"fail\", \"error\":\"Parsing failed. Try again\" }"};
     }
     if (checkPin(data["pin"].as<const char *>())) {
       unlockDoor(data["name"]);
-      return HTTPResponse{ 200, "application/json", "{\"status\":\"success\"}" };
+      return HTTPResponse{200, "application/json", "{\"status\":\"success\"}"};
     } else {
-      return HTTPResponse{ 401, "application/json", "{\"status\":\"fail\", \"error\":\"Wrong pin stored, pin may have been updated\" }" };
+      return HTTPResponse{401, "application/json",
+                          "{\"status\":\"fail\", \"error\":\"Wrong pin stored, pin may have been updated\" }"};
     }
   });
-
   handleRequest("/update-settings", HTTP_PATCH, &updateSettings);
   handleRequest("/status", HTTP_GET, [](String body) {
     String status = "{";
-    status += "\"lock-name\":\"" + LOCK_NAME + "\",";
+    status += "\"lock_name\":\"" + LOCK_NAME + "\",";
     status += "\"owner\":\"" + OWNER_NAME + "\",";
-    status += "\"wifi-ssid\":\"" + prefs.getString("wifi-ssid") + "\",";
-    status += "\"battery-voltage\":\"" + String((analogRead(BATTERY_PIN) / 4095.0) * 3.3 * (12.0 / 3.3), 2) + "\",";
+    status += "\"wifi_ssid\":\"" + prefs.getString("wifi_ssid") + "\",";
+    status += "\"battery\":\"" + String(getBatteryLevel()) + "\",";
     status += "}";
-    return HTTPResponse{ 200, "application/json", status };
+    return HTTPResponse{200, "application/json", status};
   });
   localServer.begin();
 }
@@ -641,10 +639,10 @@ void drawKeypad() {
   tft.fillScreen(TFT_BLACK);
   tft.setTextSize(2);
   String keys[4][3] = {
-    { "1", "2", "3" },
-    { "4", "5", "6" },
-    { "7", "8", "9" },
-    { "x", "0", "🔔" }  // X: Clear, B: Bell/Enter
+      {"1", "2", "3"},
+      {"4", "5", "6"},
+      {"7", "8", "9"},
+      {"x", "0", "🔔"}  // X: Clear, B: Bell/Enter
   };
 
   for (int r = 0; r < 4; r++) {
@@ -671,8 +669,7 @@ void handleTouch() {
       } else {
         if (checkPin(passcodeBuffer.c_str())) {
           unlockDoor("Passcode");
-          if (faceUnlockTimeout)
-            pinManuallyEntered = true;
+          if (faceUnlockTimeout) pinManuallyEntered = true;
         }
         passcodeBuffer = "";
       }

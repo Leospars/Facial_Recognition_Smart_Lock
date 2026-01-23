@@ -1,11 +1,11 @@
 #ifndef BLE_SERVER_H
 #define BLE_SERVER_H
 
+#include <ArduinoJson.h>
+#include <BLE2902.h>
 #include <BLEDevice.h>
 #include <BLEServer.h>
 #include <BLEUtils.h>
-#include <BLE2902.h>
-#include <ArduinoJson.h>
 
 // UUIDs for BLE Service and Characteristics
 #define SERVICE_UUID "12345678-1234-5678-1234-56789abcdef0"
@@ -16,19 +16,19 @@ class BLECommissioningServer {
 public:
   BLECommissioningServer();
   ~BLECommissioningServer();
-  
-  void begin(const char* deviceName);
-  void sendResponse(const String& response);
+
+  void begin(const char *deviceName);
+  void sendResponse(const String &response);
   bool isConnected();
   bool hasReceivedPayload();
-  
+
 private:
-  BLEServer* pServer;
-  BLECharacteristic* pRxCharacteristic;
-  BLECharacteristic* pTxCharacteristic;
+  BLEServer *pServer;
+  BLECharacteristic *pRxCharacteristic;
+  BLECharacteristic *pTxCharacteristic;
   bool deviceConnected;
   bool payloadReceived;
-  
+
   friend class ServerCallbacks;
   friend class RxCharacteristicCallbacks;
 };
@@ -36,25 +36,24 @@ private:
 // Callback class for BLE Server events
 class ServerCallbacks : public BLEServerCallbacks {
 public:
-  ServerCallbacks(BLECommissioningServer* server) : bleServer(server) {}
-  
-  void onConnect(BLEServer* pServer);
-  void onDisconnect(BLEServer* pServer);
-  
+  ServerCallbacks(BLECommissioningServer *server) : bleServer(server) {}
+
+  void onConnect(BLEServer *pServer);
+  void onDisconnect(BLEServer *pServer);
+
 private:
-  BLECommissioningServer* bleServer;
+  BLECommissioningServer *bleServer;
 };
 
 // Callback class for RX Characteristic (only for parsing/validation)
 class RxCharacteristicCallbacks : public BLECharacteristicCallbacks {
 public:
-  RxCharacteristicCallbacks(BLECommissioningServer* server) : bleServer(server) {}
-  
-  void onWrite(BLECharacteristic* pCharacteristic);
-  
+  RxCharacteristicCallbacks(BLECommissioningServer *server) : bleServer(server) {}
+
+  void onWrite(BLECharacteristic *pCharacteristic);
+
 private:
-  BLECommissioningServer* bleServer;
+  BLECommissioningServer *bleServer;
 };
 
-#endif // BLE_SERVER_H
-
+#endif  // BLE_SERVER_H
