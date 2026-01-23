@@ -96,28 +96,28 @@ void RxCharacteristicCallbacks::onWrite(BLECharacteristic* pCharacteristic) {
   }
   
   // Validate required fields
-  if (!doc.containsKey("user-id") || !doc.containsKey("wifi-ssid") || 
-      !doc.containsKey("wifi-pwd") || !doc.containsKey("lock-name") || 
+  if (!doc.containsKey("user_id") || !doc.containsKey("wifi_ssid") || 
+      !doc.containsKey("wifi_pwd") || !doc.containsKey("lock_name") || 
       !doc.containsKey("owner") || !doc.containsKey("pin") ||
-      !doc.containsKey("pairing-code") || !doc.containsKey("token")) {
+      !doc.containsKey("pairing_code") || !doc.containsKey("token")) {
         bleServer->sendResponse("{\"error\":\"Missing required fields\"}");
         Serial.println("[BLE] Missing required fields");
     return;
   }
   
   Preferences prefs;
-  prefs.begin("my-storage", false);
-  if( !doc["pairing-code"].as<String>().equals(prefs.getString("pairing-code"))) {
+  prefs.begin("my_storage", false);
+  if( !doc["pairing_code"].as<String>().equals(prefs.getString("pairing_code"))) {
     bleServer->sendResponse("{\"error\":\"Invalid pairing code\"}");
     Serial.println("[BLE] Invalid pairing code");
     return;
   }
   
   // Store in NVS
-  prefs.putString("user-id", doc["user-id"].as<String>());
-  prefs.putString("wifi-ssid", doc["wifi-ssid"].as<String>());
-  prefs.putString("wifi-pwd", doc["wifi-pwd"].as<String>());
-  prefs.putString("lock-name", doc["lock-name"].as<String>());
+  prefs.putString("user_id", doc["user_id"].as<String>());
+  prefs.putString("wifi_ssid", doc["wifi_ssid"].as<String>());
+  prefs.putString("wifi_pwd", doc["wifi_pwd"].as<String>());
+  prefs.putString("lock_name", doc["lock_name"].as<String>());
   prefs.putString("owner", doc["owner"].as<String>());
   prefs.putString("token", doc["token"].as<String>());
   prefs.putString("pin", doc["pin"].as<String>());
