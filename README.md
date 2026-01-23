@@ -100,4 +100,4 @@ Navigate to the dependency folder .pio/[board]/User_Setup.h uncomment your board
 - Update schematics and pin declarations to use ESP32 S3 instead of the ESP32 C5 which I was going to use at first but will change due to board unavailability and unsuccessful compilation in Arduino IDE 2, ESP32C5 is currently very new.
 - Configure and test FCM and remote MQTT commands
 - Encypt ble server uuid and name for qr code scan
-- Improve provision security with /api/auth check after wifi connected and setup code for secure pairing for secure pairing preventing passerby connection during advertising
+- Implement reset lock when on board button is held for set time 3s

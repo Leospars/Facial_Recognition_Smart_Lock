@@ -1,9 +1,10 @@
 #include <Arduino.h>
+#include <ArduinoJson.h>
+#include <HTTPClient.h>
+#include <PubSubClient.h>
+#include <WebServer.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
-#include <WebServer.h>
-#include <PubSubClient.h>
-#include <ArduinoJson.h>
 // #include <Matter.h>
 // #include <MatterEndPoint.h>
 #include <Preferences.h>
@@ -19,6 +20,8 @@
 #define LOCK_PIN 24
 #define K230D_PWR_PIN 23
 #define BATTERY_PIN 0
+#define BUTTON_PIN 25
+#define T_IRQ 3  // Touch Interupt
 
 // Display PINS initialized in User_Setup.h of TFT_eSPI Library
 
@@ -26,10 +29,14 @@
 const char *fcm_server = "fcm.googleapis.com";
 const char *fcm_key = "YOUR_FCM_SERVER_KEY";  // Legacy Key or OAuth2 Relay
 const char *mqtt_server = "broker.hivemq.com";
+const char *laptop_ip = "192.168.50.163";
+const char *cloud_endpoint = ("http://" + String(laptop_ip) + ":3000/api/lock").c_str();
 
 #define LOCK_ID "c0ffee00-1234-4abc-9def-9876543210aa"  // Unique Lock Identifier UUIDv7
+#define LOCK_MODEL "JUPY Block Pro"                     // Lock Model
+#define FIRMWARE_VERSION "v1.0"                         // Firmware version
 #define AUTH_DISABLE_TIME 30 * 60000UL                  // 30 minutes
-#define COMMISSION_TIME 5 * 60000UL                     // 5 minutes
+#define COMMISSION_TIME 10 * 60000UL                    // 10 minutes
 #define MQTT_ACTIVE_TIMEOUT 2 * 60000UL                 // 2 minutes
 #define K230D_MAX_UPTIME 3000UL                         // 3 seconds
 
@@ -77,6 +84,7 @@ void initialCommisioning();
 void wakeK230D(String command = "{\"cmd\":\"On\"}");
 
 bool checkPin(const char *);
+void unlockDoor(String);
 void drawKeypad();
 void FCM_Notification(String, String);
 void setupREST();
@@ -98,6 +106,7 @@ void setup() {
   pinMode(LOCK_PIN, OUTPUT);
   pinMode(K230D_PWR_PIN, OUTPUT);
   pinMode(BATTERY_PIN, INPUT);
+  pinMode(BUTTON_PIN, INPUT);
 
   digitalWrite(LOCK_PIN, HIGH);      // Fail-secure: HIGH usually keeps locked
   digitalWrite(K230D_PWR_PIN, LOW);  // K230D off by default
@@ -111,12 +120,14 @@ void setup() {
 
   // 1. Start BLE Server for commissioning
   prefs.putString("pairing-code", "A1B2C3");
-  bleServer.begin("JUPY_SmartLock");
+  bleServer.begin("JUPY Lock Pro");
 
   // 2. Matter/BLE Provisioning & Transition
+  Serial.println("Check for commsioning");
   initialCommisioning();
 
   // 3. Local REST API
+  Serial.println("Setup Rest Server");
   setupREST();
 
   mqttClient.setServer(mqtt_server, 1883);
@@ -124,6 +135,10 @@ void setup() {
 }
 
 void loop() {
+  if (digitalRead(BUTTON_PIN)) {
+    unlockDoor("Manual");
+  }
+
   handlePIR();
   handleUART();
   handleTouch();
@@ -153,7 +168,7 @@ void wakeK230D(String command) {
   digitalWrite(K230D_PWR_PIN, HIGH);
   if (faceUnlockTimeout) {
     command.replace("}", ", \"face-timeout\": true }");
-    //Disable camera on start up and skip face recog code,
+    // Disable camera on start up and skip face recog code,
     // but if doorbell request then enable camera on K230D side
   }
   Serial.println(command);
@@ -321,6 +336,33 @@ void FCM_Notification(String title, String body) {
   client.stop();
 }
 
+bool registerLock(String token) {
+  HTTPClient http;
+  String url = String(cloud_endpoint) + "/register";
+
+  http.begin(url);
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("Authorization", "Bearer " + token);
+  String body = "{\"userId\":\"" + USER_ID + "\", \"lockId\":\"" + LOCK_ID + "\",\"lockName\":\"" + LOCK_NAME + "\",\"owner\":\"" + OWNER_NAME + "\",\"model\":\"" + String(LOCK_MODEL) + "\",\"firmwareVersion\":\"" + String(FIRMWARE_VERSION) + "\"}";
+  Serial.printf("Post Data: %s", body.c_str());
+  int httpResponseCode = http.POST(body);
+
+  if (httpResponseCode > 0) {
+    String response = http.getString();
+    Serial.printf("Response code: %d\nResponse: %s\n", httpResponseCode, response.c_str());
+    if (httpResponseCode == HTTP_CODE_CREATED) {
+      return true;
+    } else {
+      return false;
+    }
+  } else {
+    Serial.printf("[HTTP] Register lock failed, error: %s\n", http.errorToString(httpResponseCode).c_str());
+    return false;
+  }
+  prefs.remove("token");
+  http.end();
+}
+
 void initialCommisioning() {
   String WIFI_SSID = prefs.getString("wifi-ssid");
   String WIFI_PWD = prefs.getString("wifi-pwd");
@@ -337,7 +379,7 @@ void initialCommisioning() {
         WIFI_PWD = prefs.getString("wifi-pwd");
         USER_ID = prefs.getString("user-id");
         LOCK_NAME = prefs.getString("lock-name");
-        OWNER_NAME = prefs.getString("owner-name");
+        OWNER_NAME = prefs.getString("owner");
         break;
       }
     }
@@ -362,9 +404,8 @@ void initialCommisioning() {
 
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("WiFi connection failed. Restarting...");
+    prefs.clear();  // Discard BLE message
     bleServer.sendResponse("{\"status\":\"wifi_fail\"}");
-    prefs.clear();
-    ESP.deepSleep(200000); // Restart after 0.2 seconds
     return;
   }
 
@@ -372,13 +413,20 @@ void initialCommisioning() {
   Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
 
+  if (!registerLock(prefs.getString("token"))) {
+    prefs.clear();
+    bleServer.sendResponse("{\"error\":\"Failed to register Lock\"}");
+    Serial.println("Commission timeout. Restarting...");
+    ESP.deepSleep(0);
+  }
+
   String simpleId = String(LOCK_ID).substring(0, 4);
   simpleId.toUpperCase();
   WiFi.setHostname(("JUPY_" + LOCK_NAME + simpleId).c_str());  // Set local hostname
   Serial.println("Hostname set to: JUPY_" + LOCK_NAME);
 
   // Send lock info via BLE TX characteristic (after WiFi is connected)
-  bleServer.sendResponse("{\"lock-id\":\"" + String(LOCK_ID) + "\",\"lock-ip\":\"" + WiFi.localIP().toString() + "\"}");
+  bleServer.sendResponse("{\"lock-id\":\"" + String(LOCK_ID) + "\",\"lock-ip\":\"" + WiFi.localIP().toString() + "\",hostname\":\"" + String(WiFi.getHostname()) + "\"}");
 
   // --- CRITICAL POWER SAVING MODES ---
   esp_wifi_set_ps(WIFI_PS_MIN_MODEM);  // 1. Enable Wi-Fi Modem Sleep
@@ -536,7 +584,7 @@ void setupREST() {
   handleRequest("/status", HTTP_GET, [](String body) {
     String status = "{";
     status += "\"lock-name\":\"" + LOCK_NAME + "\",";
-    status += "\"owner-name\":\"" + OWNER_NAME + "\",";
+    status += "\"owner\":\"" + OWNER_NAME + "\",";
     status += "\"wifi-ssid\":\"" + prefs.getString("wifi-ssid") + "\",";
     status += "\"battery-voltage\":\"" + String((analogRead(BATTERY_PIN) / 4095.0) * 3.3 * (12.0 / 3.3), 2) + "\",";
     status += "}";
