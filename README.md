@@ -39,17 +39,16 @@ Dependencies (PlatformIO)
 
 Navigate to the dependency folder .pio/[board]/User_Setup.h uncomment your board and edit the following; optionally in User_Setup_Select.h select your board
 ``` c++
-// Example for ESP32 C5 Setup
-#define TFT_MISO 19
-#define TFT_MOSI 23
-#define TFT_SCLK 18
-#define TFT_CS   15  // Chip select control pin
-#define TFT_DC    2  // Data Command control pin
-// #define TFT_RST   4  // Reset pin (could connect to RST pin)
+// Example for ESP32 S3 Setup
+#define TFT_MISO 13
+#define TFT_MOSI 11
+#define TFT_SCLK 12
+#define TFT_CS   10  // Chip select control pin
+#define TFT_DC    9  // Data Command control pin
 
 #define TFT_RST  -1  // Set TFT_RST to -1 if display RESET is connected to ESP32 board RST
 
-#define TOUCH_CS 10 //Enable touch
+#define TOUCH_CS 14 //Enable touch
 ```
 
 ### Operation

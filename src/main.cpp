@@ -15,12 +15,12 @@
 #include "esp_bt.h"
 
 // --- Pins (As specified) ---
-#define PIR_PIN 26
-#define LOCK_PIN 24
-#define K230D_PWR_PIN 23
-#define BATTERY_PIN 0
-#define BUTTON_PIN 25
-#define T_IRQ 3  // Touch Interupt
+#define LOCK_PIN 39
+#define K230D_PWR_PIN 40
+#define BATTERY_PIN 7
+#define PIR_PIN 42
+#define BUTTON_PIN 37
+#define T_IRQ 4  // Touch Interupt
 
 // Display PINS initialized in User_Setup.h of TFT_eSPI Library
 
