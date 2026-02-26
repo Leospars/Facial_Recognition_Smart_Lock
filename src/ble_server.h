@@ -21,6 +21,8 @@ public:
   void sendResponse(const String &response);
   bool isConnected();
   bool hasReceivedPayload();
+  bool hasReceivedIPAck();
+  void end();
 
 private:
   BLEServer *pServer;
@@ -28,6 +30,7 @@ private:
   BLECharacteristic *pTxCharacteristic;
   bool deviceConnected;
   bool payloadReceived;
+  bool ipReceivedAck;
 
   friend class ServerCallbacks;
   friend class RxCharacteristicCallbacks;

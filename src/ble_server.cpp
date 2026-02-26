@@ -1,12 +1,24 @@
 #include "ble_server.h"
 #include <Preferences.h>
+#include <Wifi.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+
+// Forward declaration
+static void wifiScanTask(void *parameter);
 
 // ==================== BLECommissioningServer ====================
 BLECommissioningServer::BLECommissioningServer()
-    : pServer(nullptr), pRxCharacteristic(nullptr), pTxCharacteristic(nullptr),
-      deviceConnected(false), payloadReceived(false) {}
+    : pServer(nullptr), pRxCharacteristic(nullptr), pTxCharacteristic(nullptr), deviceConnected(false),
+      payloadReceived(false) {}
 
-BLECommissioningServer::~BLECommissioningServer() { BLEDevice::deinit(); }
+BLECommissioningServer::~BLECommissioningServer() { end(); }
+
+void BLECommissioningServer::end() {
+  sendResponse("{\"status\":\"disconnected\"}");
+  pServer->getAdvertising()->stop();
+  BLEDevice::deinit();
+}
 
 void BLECommissioningServer::begin(const char *deviceName) {
   BLEDevice::init(deviceName);
@@ -18,14 +30,12 @@ void BLECommissioningServer::begin(const char *deviceName) {
   BLEService *commissionService = pServer->createService(SERVICE_UUID);
 
   // RX: Write-only (client sends commissioning payload)
-  pRxCharacteristic = commissionService->createCharacteristic(
-      RX_CHAR_UUID, BLECharacteristic::PROPERTY_WRITE_NR);
+  pRxCharacteristic = commissionService->createCharacteristic(RX_CHAR_UUID, BLECharacteristic::PROPERTY_WRITE_NR);
   pRxCharacteristic->setCallbacks(new RxCharacteristicCallbacks(this));
 
   // TX: Read + Notify (server sends lock info after WiFi connects)
-  pTxCharacteristic = commissionService->createCharacteristic(
-      TX_CHAR_UUID,
-      BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
+  pTxCharacteristic = commissionService->createCharacteristic(TX_CHAR_UUID, BLECharacteristic::PROPERTY_READ |
+                                                                                BLECharacteristic::PROPERTY_NOTIFY);
   pTxCharacteristic->addDescriptor(new BLE2902());
   pTxCharacteristic->setValue("{}");  // Default empty response
 
@@ -54,6 +64,8 @@ bool BLECommissioningServer::isConnected() { return deviceConnected; }
 
 bool BLECommissioningServer::hasReceivedPayload() { return payloadReceived; }
 
+bool BLECommissioningServer::hasReceivedIPAck() { return ipReceivedAck; }
+
 // ==================== ServerCallbacks ====================
 void ServerCallbacks::onConnect(BLEServer *pServer) {
   bleServer->deviceConnected = true;
@@ -64,6 +76,66 @@ void ServerCallbacks::onDisconnect(BLEServer *pServer) {
   bleServer->deviceConnected = false;
   Serial.println("[BLE] Client disconnected");
   pServer->getAdvertising()->start();
+}
+
+// ==================== WiFi Scan Task ====================
+static TaskHandle_t wifiScanTaskHandle = nullptr;
+static BLECommissioningServer *scanResultBleServer = nullptr;
+
+static void wifiScanTask(void *parameter) {
+  Serial.println("[WiFi Scan] Starting scan...");
+
+  // Start WiFi scan (this can take several seconds)
+  int n = WiFi.scanNetworks(false, false, false, 20);  // Reduced max results to save memory
+
+  if (n == -1) {
+    Serial.println("[WiFi Scan] Scan failed");
+    scanResultBleServer->sendResponse("{\"error\":\"WiFi scan failed\"}");
+    wifiScanTaskHandle = nullptr;
+    vTaskDelete(NULL);
+    return;
+  } else if (n == 0) {
+    Serial.println("[WiFi Scan] No networks found");
+    scanResultBleServer->sendResponse("[]");
+    wifiScanTaskHandle = nullptr;
+    vTaskDelete(NULL);
+    return;
+  }
+
+  Serial.printf("[WiFi Scan] Found %d networks\n", n);
+
+  // Add each network to the JSON array - use static buffer to avoid stack allocation
+  int limit = (n < 10) ? n : 10;
+
+  static char jsonResponse[1024];  // Static buffer to avoid stack allocation
+  snprintf(jsonResponse, sizeof(jsonResponse), "{\"wifi_networks\": [");
+  
+  for (int i = 0; i < limit; i++) {
+    char networkJson[128];
+    snprintf(networkJson, sizeof(networkJson), 
+             "{\"ssid\":\"%s\",\"rssi\":%d,\"secured\":%s}",
+             WiFi.SSID(i).c_str(), 
+             WiFi.RSSI(i),
+             (WiFi.encryptionType(i) != WIFI_AUTH_OPEN) ? "true" : "false");
+    
+    if (i > 0) {
+      strcat(jsonResponse, ",");
+    }
+    strcat(jsonResponse, networkJson);
+  }
+  strcat(jsonResponse, "]}");
+
+  // Free scan results to free memory
+  WiFi.scanDelete();
+
+  Serial.println("[WiFi Scan] Sending response...");
+  scanResultBleServer->sendResponse(jsonResponse);
+
+  // Clear static data before exiting
+  scanResultBleServer = nullptr;
+  wifiScanTaskHandle = nullptr;
+
+  vTaskDelete(NULL);
 }
 
 // ==================== RxCharacteristicCallbacks ====================
@@ -86,11 +158,38 @@ void RxCharacteristicCallbacks::onWrite(BLECharacteristic *pCharacteristic) {
     return;
   }
 
+  if(doc["status"] && doc["status"].as<String>().equals("ip_ack")) {
+    bleServer->ipReceivedAck = true;
+    Serial.println("[BLE] Received IP acknowledgment from app.");
+    return;
+  }
+
+  if (doc["request"] && doc["request"].as<String>().equals("wifi_networks")) {
+    // Check if a scan is already in progress
+    if (wifiScanTaskHandle != nullptr) {
+      bleServer->sendResponse("{\"error\":\"Scan already in progress\"}");
+      return;
+    }
+
+    // Start WiFi scan in a separate task with larger stack to avoid stack overflow
+    scanResultBleServer = bleServer;
+    xTaskCreatePinnedToCore(wifiScanTask,         // Task function
+                            "WiFiScan",           // Task name
+                            12288,                // Stack size (12KB - increased for safety)
+                            NULL,                 // Parameters
+                            1,                    // Priority
+                            &wifiScanTaskHandle,  // Task handle
+                            1                     // Core (1 = separate from BLE core)
+    );
+
+    // Send initial response that scan has started
+    bleServer->sendResponse("{\"status\":\"scanning\"}");
+    return;
+  }
+
   // Validate required fields
-  if (!doc.containsKey("user_id") || !doc.containsKey("wifi_ssid") ||
-      !doc.containsKey("wifi_pwd") || !doc.containsKey("lock_name") ||
-      !doc.containsKey("owner") || !doc.containsKey("pin") ||
-      !doc.containsKey("pairing_code") || !doc.containsKey("token")) {
+  if (!doc["user_id"] || !doc["wifi_ssid"] || !doc["wifi_pwd"] || !doc["lock_name"] || !doc["owner"] || !doc["pin"] ||
+      !doc["pairing_code"] || !doc["token"]) {
     bleServer->sendResponse("{\"error\":\"Missing required fields\"}");
     Serial.println("[BLE] Missing required fields");
     return;
@@ -98,8 +197,7 @@ void RxCharacteristicCallbacks::onWrite(BLECharacteristic *pCharacteristic) {
 
   Preferences prefs;
   prefs.begin("my_storage", false);
-  if (!doc["pairing_code"].as<String>().equals(
-          prefs.getString("pairing_code"))) {
+  if (!doc["pairing_code"].as<String>().equals(prefs.getString("pairing_code"))) {
     bleServer->sendResponse("{\"error\":\"Invalid pairing code\"}");
     Serial.println("[BLE] Invalid pairing code");
     return;
@@ -115,10 +213,10 @@ void RxCharacteristicCallbacks::onWrite(BLECharacteristic *pCharacteristic) {
   prefs.putString("pin", doc["pin"].as<String>());
   prefs.end();
 
-  bleServer->payloadReceived = true;
-  Serial.println("[BLE] Credentials stored successfully");
-
   // Send acknowledgment via TX characteristic
   String ack = "{\"status\":\"received\"}";
   bleServer->sendResponse(ack);
+
+  bleServer->payloadReceived = true;
+  Serial.println("[BLE] Credentials stored successfully");
 }

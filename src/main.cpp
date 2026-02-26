@@ -29,12 +29,16 @@ const char *fcm_server = "fcm.googleapis.com";
 const char *fcm_key = "YOUR_FCM_SERVER_KEY";  // Legacy Key or OAuth2 Relay
 const char *mqtt_server = "broker.hivemq.com";
 const char *laptop_ip = "192.168.50.163";
-const char *cloud_endpoint = ("http://" + String(laptop_ip) + ":3000/api/lock").c_str();
+const char *projectId = "ienqcmbfdobzcggkhajc";
+const char *register_lock_endpoint =
+    ("https://" + String(projectId) + ".supabase.co/functions/v1/make-server-a213de84/locks/register").c_str();
+// ("http://" + String(laptop_ip) + ":3000/api/lock/register").c_str(); //local dev
 
 #define LOCK_ID "c0ffee00-1234-4abc-9def-9876543210aa"  // Unique Lock Identifier UUIDv7
+#define SIMPLE_ID "coff"                                // Simple ID (first 4 characters of LOCK_ID)
 #define LOCK_MODEL "JUPY Block Pro"                     // Lock Model
 #define FIRMWARE_VERSION "v1.0"                         // Firmware version
-#define PAIRING_CODE "A1B2C3"                           // Lock Pairing Code
+#define PAIRING_CODE "123456"                           // Lock Pairing Code
 #define AUTH_DISABLE_TIME 30 * 60000UL                  // 30 minutes
 #define COMMISSION_TIME 10 * 60000UL                    // 10 minutes
 #define MQTT_ACTIVE_TIMEOUT 2 * 60000UL                 // 2 minutes
@@ -82,6 +86,7 @@ void handleTouch();
 void handleTimeouts();
 void monitorBattery();
 void initialCommisioning();
+void connectToWifi(const String &ssid, const String &password);
 void wakeK230D(String command = "{\"cmd\":\"on\"}");
 
 bool checkPin(const char *);
@@ -132,19 +137,18 @@ void setup() {
 
   // 0. Initialize Storage
   prefs.begin("my_storage", false);
-
-  // 1. Start BLE Server for commissioning
   prefs.putString("pairing_code", PAIRING_CODE);
-  bleServer.begin("JUPY Lock Pro");
 
-  // 2. Matter/BLE Provisioning & Transition
+  // 1. Matter/BLE Provisioning & Transition
   Serial.println("Check for commsioning");
   initialCommisioning();
 
-  // 3. Local REST API
+  // 2. Local REST API
   Serial.println("Setup Rest Server");
   setupREST();
 
+  Serial.println("Device Setup Complete.");
+  Serial.println("===========================\n");
   mqttClient.setServer(mqtt_server, 1883);
   mqttClient.setCallback(mqttCallback);
 }
@@ -210,10 +214,9 @@ void startDeepSleep(unsigned long milli_sec = 0) {
 
   Serial.println("Radios gracefully shut down.");
 
-  // 1. Enable EXT1 Wakeup (PIR on Pin 7, Button on Pin 0)
+  // 1. Enable EXT1 Wakeup (PIR, Button, and Boot Button)
   // Note: All pins in this call must share the same level (e.g., HIGH)
-  // If Button is pull-up (LOW when pressed), it needs an inverter to work with PIR (HIGH)
-  uint64_t pin_mask = (1ULL << PIR_PIN) | (1ULL << BUTTON_PIN);
+  uint64_t pin_mask = (1ULL << PIR_PIN) | (1ULL << BUTTON_PIN) | (1ULL << 0);  // GPIO0 = Boot Button
   esp_sleep_enable_ext1_wakeup(pin_mask, ESP_EXT1_WAKEUP_ANY_HIGH);
 
   // 2. Enable Touch Wakeup using touch interrupt pin
@@ -373,14 +376,14 @@ void FCM_Notification(String title, String body) {
 
 bool registerLock(String token) {
   HTTPClient http;
-  String url = String(cloud_endpoint) + "/register";
+  String url = register_lock_endpoint;
 
   http.begin(url);
   http.addHeader("Content-Type", "application/json");
   http.addHeader("Authorization", "Bearer " + token);
   String body = "{\"userId\":\"" + USER_ID + "\", \"lockId\":\"" + LOCK_ID + "\",\"lockName\":\"" + LOCK_NAME +
                 "\",\"owner\":\"" + OWNER_NAME + "\",\"model\":\"" + String(LOCK_MODEL) + "\",\"firmwareVersion\":\"" +
-                String(FIRMWARE_VERSION) + "\"}";
+                String(FIRMWARE_VERSION) + "\",\"ip_address\":\"" + WiFi.localIP().toString() + "\"}";
   Serial.printf("Post Data: %s", body.c_str());
   int httpResponseCode = http.POST(body);
 
@@ -400,37 +403,28 @@ bool registerLock(String token) {
   http.end();
 }
 
-void initialCommisioning() {
-  String WIFI_SSID = prefs.getString("wifi_ssid");
-  String WIFI_PWD = prefs.getString("wifi_pwd");
+void disableBLE() {
+  btStop();
+  esp_bt_controller_disable();
+  esp_bt_controller_deinit();
+  Serial.println("BLE Disabled.");
+}
 
-  // If credentials not in NVS, wait for BLE commissioning
-  if (WIFI_SSID.isEmpty()) {
-    Serial.println("Waiting for BLE commissioning payload to complete...");
-
-    unsigned long commissionStart = millis();
-    while (millis() - commissionStart < COMMISSION_TIME) {
-      delay(100);  // Avoid busy loop
-      if (bleServer.hasReceivedPayload()) {
-        WIFI_SSID = prefs.getString("wifi_ssid");
-        WIFI_PWD = prefs.getString("wifi_pwd");
-        USER_ID = prefs.getString("user_id");
-        LOCK_NAME = prefs.getString("lock_name");
-        OWNER_NAME = prefs.getString("owner");
-        break;
-      }
-    }
-
-    if (WIFI_SSID.isEmpty()) {
-      Serial.println("Commission timeout. Require Restart...");
-      startDeepSleep();
-      return;
-    }
+void connectToWifi(const String &ssid, const String &password) {
+  if (ssid.isEmpty()) {
+    Serial.println("WiFi SSID is empty. Cannot connect to WiFi.");
+    return;
   }
 
-  // Connect to WiFi
-  Serial.println("Connecting to WiFi: " + WIFI_SSID);
-  WiFi.begin(WIFI_SSID.c_str(), WIFI_PWD.c_str());
+  // Set hostname
+  String clean_model = String(LOCK_MODEL);
+  clean_model.toLowerCase();
+  clean_model.replace(" ", "_");
+  String hostname = clean_model + "_" + SIMPLE_ID;
+  WiFi.setHostname(hostname.c_str());
+
+  Serial.println("Connecting to WiFi: " + ssid);
+  WiFi.begin(ssid.c_str(), password.c_str());
 
   unsigned long wifiStartTime = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - wifiStartTime < 20000) {
@@ -440,16 +434,72 @@ void initialCommisioning() {
   Serial.println();
 
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("WiFi connection failed. Restarting...");
-    prefs.clear();  // Discard BLE message
-    bleServer.sendResponse("{\"status\":\"wifi_fail\"}");
-    startDeepSleep(200);
+    Serial.println("WiFi connection failed.");
     return;
   }
 
   Serial.println("WiFi connected!");
   Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
+
+  // --- BALANCED POWER SAVING MODES ---
+  // Use less aggressive power save for better connectivity
+  esp_wifi_set_ps(WIFI_PS_MAX_MODEM);  // More responsive than MIN_MODEM
+
+  // Set DTIM interval to match router (usually 1-3)
+  wifi_config_t conf;
+  esp_wifi_get_config(WIFI_IF_STA, &conf);
+  conf.sta.listen_interval = 3;  // Listen every 3 beacons (~300ms with 100ms beacon interval)
+  esp_wifi_set_config(WIFI_IF_STA, &conf);
+
+  Serial.println("Wi-Fi Balanced Power Save Enabled");
+}
+
+void initialCommisioning() {
+  String WIFI_SSID = (prefs.isKey("wifi_ssid")) ? prefs.getString("wifi_ssid") : "";
+  String WIFI_PWD = (!WIFI_SSID.isEmpty()) ? prefs.getString("wifi_pwd") : "";
+
+  if (!WIFI_SSID.isEmpty()) {
+    Serial.println("Device is already commissioned");
+    LOCK_NAME = prefs.getString("lock_name");
+    OWNER_NAME = prefs.getString("owner");
+    USER_ID = prefs.getString("user_id");
+    connectToWifi(WIFI_SSID, WIFI_PWD);
+    return;
+  }
+
+  // If credentials not in NVS, start BLE and wait for commissioning
+  bleServer.begin("JUPY Lock Pro");
+  Serial.println("Waiting for BLE commissioning payload to complete...");
+
+  unsigned long commissionStart = millis();
+  while (millis() - commissionStart < COMMISSION_TIME) {
+    delay(100);  // Avoid busy loop
+    if (bleServer.hasReceivedPayload()) {
+      WIFI_SSID = prefs.getString("wifi_ssid");
+      WIFI_PWD = prefs.getString("wifi_pwd");
+      USER_ID = prefs.getString("user_id");
+      LOCK_NAME = prefs.getString("lock_name");
+      OWNER_NAME = prefs.getString("owner");
+      break;
+    }
+  }
+
+  if (WIFI_SSID.isEmpty()) {
+    Serial.println("Commission timeout. Require Restart...");
+    startDeepSleep();
+    return;
+  }
+
+  // Connect to WiFi
+  connectToWifi(WIFI_SSID, WIFI_PWD);
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi connection failed. Restarting...");
+    prefs.clear();  // Discard BLE message
+    bleServer.sendResponse("{\"status\":\"wifi_fail\"}");
+    startDeepSleep(200);
+    return;
+  }
 
   if (!registerLock(prefs.getString("token"))) {
     prefs.clear();
@@ -458,31 +508,24 @@ void initialCommisioning() {
     startDeepSleep();
   }
 
-  String simpleId = String(LOCK_ID).substring(0, 4);
-  simpleId.toUpperCase();
-  WiFi.setHostname(("JUPY_" + LOCK_NAME + simpleId).c_str());  // Set local hostname
-  Serial.println("Hostname set to: JUPY_" + LOCK_NAME);
-
   // Send lock info via BLE TX characteristic (after WiFi is connected)
-  bleServer.sendResponse("{\"lock_id\":\"" + String(LOCK_ID) + "\",\"lock_ip\":\"" + WiFi.localIP().toString() +
-                         "\",hostname\":\"" + String(WiFi.getHostname()) + "\"}");
+  String ipStatus = "{\"lock_id\":\"" + String(LOCK_ID) + "\",\"lock_ip\":\"" + WiFi.localIP().toString() +
+                    "\",\"hostname\":\"" + String(WiFi.getHostname()) + "\"}";
+  bleServer.sendResponse(ipStatus);
 
-  // --- CRITICAL POWER SAVING MODES ---
-  esp_wifi_set_ps(WIFI_PS_MIN_MODEM);  // 1. Enable Wi-Fi Modem Sleep
+  for (int i = 0; i < 5; i++) {
+    delay(100);  // Avoid busy loop
+    if (bleServer.hasReceivedIPAck()) {
+      break;
+    } else {
+      bleServer.sendResponse(ipStatus);
+      delay(100);
+    }
+  }
 
-  // 2. Set DTIM interval
-  wifi_config_t conf;
-  esp_wifi_get_config(WIFI_IF_STA, &conf);
-  conf.sta.listen_interval = 10;  // Listen every 10 beacons (~1 second)
-  esp_wifi_set_config(WIFI_IF_STA, &conf);
-
-  Serial.println("Wi-Fi Power Save Enabled");
-
-  // Disable BLE after commissioning
-  btStop();
-  esp_bt_controller_disable();
-  esp_bt_controller_deinit();
-  Serial.println("BLE Disabled. Wi-Fi Active.");
+  // close ble server
+  bleServer.end();
+  disableBLE();  // Disable BLE after commissioning
 }
 
 void endMQTTSession() {
