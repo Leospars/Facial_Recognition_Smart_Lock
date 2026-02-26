@@ -650,6 +650,23 @@ HTTPResponse updateSettings(String body) {
 }
 
 void setupREST() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("WiFi not connected. Attempting to reconnect...");
+    String WIFI_SSID = prefs.getString("wifi_ssid");
+    String WIFI_PWD = prefs.getString("wifi_pwd");
+    if (!WIFI_SSID.isEmpty()) {
+      connectToWifi(WIFI_SSID, WIFI_PWD);
+    }
+    
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("Reconnection failed. Creating access point for server.");
+      String ap_ssid = "JUPY_SmartLock_" + String(SIMPLE_ID);
+      WiFi.softAP(ap_ssid.c_str(), "12345678");
+      delay(100);
+      return;
+    }
+  }
+
   handleRequest("/unlock", HTTP_POST, [](String body) {
     JsonDocument data;
     DeserializationError error = deserializeJson(data, body);
@@ -664,6 +681,8 @@ void setupREST() {
                           "{\"status\":\"fail\", \"error\":\"Wrong pin stored, pin may have been updated\" }"};
     }
   });
+  handleRequest("/health", HTTP_GET,
+                [](String body) { return HTTPResponse{200, "application/json", "{\"status\":\"I am healthy\"}"}; });
   handleRequest("/update-settings", HTTP_PATCH, &updateSettings);
   handleRequest("/status", HTTP_GET, [](String body) {
     String status = "{";
@@ -674,7 +693,10 @@ void setupREST() {
     status += "}";
     return HTTPResponse{200, "application/json", status};
   });
+  
   localServer.begin();
+  Serial.print("[Server] REST Server started on: ");
+  Serial.println(WiFi.localIP());
 }
 
 // --- DISPLAY & TOUCH ---
@@ -682,10 +704,7 @@ void drawKeypad() {
   tft.fillScreen(TFT_BLACK);
   tft.setTextSize(2);
   String keys[4][3] = {
-      {"1", "2", "3"},
-      {"4", "5", "6"},
-      {"7", "8", "9"},
-      {"x", "0", "🔔"}  // X: Clear, B: Bell/Enter
+      {"1", "2", "3"}, {"4", "5", "6"}, {"7", "8", "9"}, {"x", "0", "🔔"}  // X: Clear, B: Bell/Enter
   };
 
   for (int r = 0; r < 4; r++) {
